@@ -40,6 +40,7 @@
   let newCategory = ''
   let undoStack: PracticeProject[] = []
   let redoStack: PracticeProject[] = []
+  let reassignTarget: Record<string, string> = {}
   let selectedGroup: SenseGroup | undefined
   let selectedAttempt: Attempt | undefined
 
@@ -50,10 +51,36 @@
   $: progress = Math.round((completedAttempts / Math.max(project.targetAttempts, 1)) * 100)
   $: averageAccuracy = selectedAttempt?.scores.length ? Math.round(selectedAttempt.scores.reduce((sum, score) => sum + score.accuracy, 0) / selectedAttempt.scores.length) : 0
   $: averageDeviation = selectedAttempt?.scores.length ? Math.round(selectedAttempt.scores.reduce((sum, score) => sum + score.deviation, 0) / selectedAttempt.scores.length) : 0
-  $: totalIssueCategories = project.errorCategories.map((category) => ({ category, count: project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category).length }))
+  $: totalIssueCategories = project.errorCategories.map((category) => ({ category, count: project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => !issue.orphaned && issue.category === category).length }))
+  $: orphanedIssues = project.attempts.flatMap((attempt) =>
+    attempt.wordIssues
+      .filter((issue) => issue.orphaned)
+      .map((issue) => ({
+        attempt,
+        issue,
+        originText: project.groups.find((group) => group.id === issue.groupId)?.text ?? '',
+        candidates: project.groups.filter((group) => group.text.includes(issue.word))
+      }))
+  )
 
   const clone = <T,>(value: T): T => structuredClone(value)
   const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+
+  /** 文字变动后重新核对每条错词：还在原意群文字里的保留，找不到的标为待重新归属 */
+  function reconcileWordIssues(draft: PracticeProject): boolean {
+    let changed = false
+    for (const attempt of draft.attempts) {
+      for (const issue of attempt.wordIssues) {
+        const group = draft.groups.find((item) => item.id === issue.groupId)
+        const orphaned = !group || !group.text.includes(issue.word)
+        if (Boolean(issue.orphaned) !== orphaned) {
+          issue.orphaned = orphaned
+          changed = true
+        }
+      }
+    }
+    return changed
+  }
 
   function editProject(mutator: (draft: PracticeProject) => void) {
     const before = clone(project)
@@ -101,6 +128,7 @@
       const group = draft.groups.find((item) => item.id === selectedGroupId)
       if (!group) return
       ;(group as unknown as Record<string, unknown>)[field] = value
+      if (field === 'text') reconcileWordIssues(draft)
     })
   }
 
@@ -129,7 +157,10 @@
   function deleteGroup() {
     if (!selectedGroup || project.groups.length <= 1) return
     const index = project.groups.findIndex((group) => group.id === selectedGroup.id)
-    editProject((draft) => { draft.groups = draft.groups.filter((group) => group.id !== selectedGroup?.id) })
+    editProject((draft) => {
+      draft.groups = draft.groups.filter((group) => group.id !== selectedGroup?.id)
+      reconcileWordIssues(draft)
+    })
     selectedGroupId = project.groups[Math.max(0, index - 1)]?.id ?? ''
   }
 
@@ -157,6 +188,7 @@
         intonation: draft.groups[index]?.intonation ?? 'flat',
         note: draft.groups[index]?.note ?? ''
       }))
+      reconcileWordIssues(draft)
     })
     selectedGroupId = project.groups[0]?.id ?? ''
   }
@@ -308,6 +340,27 @@
     })
   }
 
+  function reassignWordIssue(attemptId: string, issueId: string) {
+    const entry = orphanedIssues.find((item) => item.issue.id === issueId)
+    const wanted = reassignTarget[issueId]
+    const targetId = entry?.candidates.some((group) => group.id === wanted) ? wanted : entry?.candidates[0]?.id
+    if (!targetId) return
+    editProject((draft) => {
+      const issue = draft.attempts.find((item) => item.id === attemptId)?.wordIssues.find((item) => item.id === issueId)
+      const group = draft.groups.find((item) => item.id === targetId)
+      if (!issue || !group || !group.text.includes(issue.word)) return
+      issue.groupId = targetId
+      issue.orphaned = false
+    })
+  }
+
+  function discardWordIssue(attemptId: string, issueId: string) {
+    editProject((draft) => {
+      const attempt = draft.attempts.find((item) => item.id === attemptId)
+      if (attempt) attempt.wordIssues = attempt.wordIssues.filter((issue) => issue.id !== issueId)
+    })
+  }
+
   function addFeedback() {
     if (!selectedGroup || !feedbackText.trim()) return
     editProject((draft) => {
@@ -390,11 +443,16 @@
   onMount(async () => {
     online = navigator.onLine
     const saved = await loadPractice()
-    if (saved) project = saved
+    let reconciled = false
+    if (saved) {
+      reconciled = reconcileWordIssues(saved)
+      project = saved
+    }
     selectedGroupId = project.groups[0]?.id ?? ''
     selectedAttemptId = project.attempts.at(-1)?.id ?? ''
     loaded = true
-    saveStatus = saved ? '已恢复本机练习' : '示例练习已就绪'
+    saveStatus = saved ? (reconciled ? '已恢复本机练习，错词归属已重新核对' : '已恢复本机练习') : '示例练习已就绪'
+    if (saved && reconciled) void savePractice(project)
     window.addEventListener('online', () => { online = true })
     window.addEventListener('offline', () => { online = false })
     window.addEventListener('keydown', onKeydown)
@@ -630,7 +688,7 @@
             <button class="btn btn-sm variant-filled-secondary span-2" on:click={addWordIssue}>添加错词记录</button>
           </div>
           <div class="issue-list">
-            {#each selectedAttempt.wordIssues.filter((issue) => issue.groupId === selectedGroupId) as issue}
+            {#each selectedAttempt.wordIssues.filter((issue) => !issue.orphaned && issue.groupId === selectedGroupId) as issue}
               <div class="issue-item">
                 <span class="badge variant-filled-warning">{issue.category}</span>
                 <strong>{issue.word}</strong>
@@ -638,8 +696,14 @@
                 <button class="btn btn-sm variant-ghost text-error-500" on:click={() => removeWordIssue(issue.id)}>移除</button>
               </div>
             {/each}
-            {#if !selectedAttempt.wordIssues.some((issue) => issue.groupId === selectedGroupId)}<p class="empty-copy">本轮意群还没有错词记录。</p>{/if}
+            {#if !selectedAttempt.wordIssues.some((issue) => !issue.orphaned && issue.groupId === selectedGroupId)}<p class="empty-copy">本轮意群还没有错词记录。</p>{/if}
           </div>
+          {#if selectedAttempt.wordIssues.some((issue) => issue.orphaned)}
+            <p class="orphan-notice">
+              本轮有 {selectedAttempt.wordIssues.filter((issue) => issue.orphaned).length} 条错词因文字改动已不在原意群中，暂未计入统计。
+              <button class="orphan-link" on:click={() => workspaceTab = 'progress'}>前往「反馈进度」重新归属</button>
+            </p>
+          {/if}
         </div>
       {/if}
 
@@ -670,13 +734,47 @@
           <div><strong>{project.attempts.length}</strong><span>累计尝试</span></div>
           <div><strong>{averageAccuracy}%</strong><span>当前准确度</span></div>
           <div><strong>{averageDeviation}%</strong><span>平均偏差</span></div>
-          <div><strong>{project.errorCategories.reduce((sum, category) => sum + project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category).length, 0)}</strong><span>错词记录</span></div>
+          <div><strong>{project.errorCategories.reduce((sum, category) => sum + project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => !issue.orphaned && issue.category === category).length, 0)}</strong><span>错词记录</span></div>
+          <div class:orphan-metric={orphanedIssues.length > 0}><strong>{orphanedIssues.length}</strong><span>待重新归属</span></div>
         </div>
         <div class="category-list">
           {#each totalIssueCategories as category}
             <div><span>{category.category}</span><div class="mini-bar"><i style={`width:${Math.min(100, category.count * 18)}%`}></i></div><strong>{category.count}</strong></div>
           {/each}
         </div>
+        {#if orphanedIssues.length}
+          <div class="orphan-board">
+            <div class="section-heading">
+              <div><span class="eyebrow">PENDING REASSIGN</span><h3>待重新归属的错词</h3></div>
+              <span class="chapter-badge">{orphanedIssues.length} 条</span>
+            </div>
+            <p class="orphan-hint">以下错词因文字改动已不在原意群中，暂时不计入上方分类统计。可把它挂到含有该词的意群，或不再保留。</p>
+            <div class="orphan-list">
+              {#each orphanedIssues as entry (entry.issue.id)}
+                <div class="orphan-item">
+                  <div class="orphan-copy">
+                    <span class="badge variant-filled-warning">{entry.issue.category}</span>
+                    <strong>{entry.issue.word}</strong>
+                    <small>来自{entry.attempt.label}{entry.originText ? ` · 原意群「${entry.originText}」` : ' · 原意群已删除'}</small>
+                    <p>{entry.issue.note || '暂无补充说明'}</p>
+                  </div>
+                  <div class="orphan-actions">
+                    {#if entry.candidates.length}
+                      {@const chosen = entry.candidates.some((group) => group.id === reassignTarget[entry.issue.id]) ? reassignTarget[entry.issue.id] : entry.candidates[0].id}
+                      <select class="select" value={chosen} on:change={(event) => reassignTarget = { ...reassignTarget, [entry.issue.id]: event.currentTarget.value }}>
+                        {#each entry.candidates as group (group.id)}<option value={group.id}>{group.text}</option>{/each}
+                      </select>
+                      <button class="btn btn-sm variant-filled-primary" on:click={() => reassignWordIssue(entry.attempt.id, entry.issue.id)}>挂到该意群</button>
+                    {:else}
+                      <span class="orphan-none">当前没有意群包含「{entry.issue.word}」</span>
+                    {/if}
+                    <button class="btn btn-sm variant-ghost text-error-500" on:click={() => discardWordIssue(entry.attempt.id, entry.issue.id)}>不再保留</button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
         <div class="inline-actions">
           <input class="input" bind:value={newCategory} placeholder="新增错词分类" />
           <button class="btn btn-sm variant-soft" on:click={addCategory}>添加分类</button>
