@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from 'svelte'
   import { ProgressBar } from '@skeletonlabs/skeleton'
   import { createSampleProject } from './sample'
+  import { candidateGroups, reconcileWordIssues } from './issues'
   import { clearPractice, loadPractice, savePractice } from './storage'
   import type { Attempt, Intonation, PracticeProject, SenseGroup, StressLevel } from './types'
 
@@ -38,6 +39,7 @@
   let issueNote = ''
   let feedbackText = ''
   let newCategory = ''
+  let reassignTargets: Record<string, string> = {}
   let undoStack: PracticeProject[] = []
   let redoStack: PracticeProject[] = []
   let selectedGroup: SenseGroup | undefined
@@ -50,7 +52,8 @@
   $: progress = Math.round((completedAttempts / Math.max(project.targetAttempts, 1)) * 100)
   $: averageAccuracy = selectedAttempt?.scores.length ? Math.round(selectedAttempt.scores.reduce((sum, score) => sum + score.accuracy, 0) / selectedAttempt.scores.length) : 0
   $: averageDeviation = selectedAttempt?.scores.length ? Math.round(selectedAttempt.scores.reduce((sum, score) => sum + score.deviation, 0) / selectedAttempt.scores.length) : 0
-  $: totalIssueCategories = project.errorCategories.map((category) => ({ category, count: project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category).length }))
+  $: totalIssueCategories = project.errorCategories.map((category) => ({ category, count: project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category && !issue.orphaned).length }))
+  $: orphanedIssues = project.attempts.flatMap((attempt) => attempt.wordIssues.filter((issue) => issue.orphaned).map((issue) => ({ attempt, issue })))
 
   const clone = <T,>(value: T): T => structuredClone(value)
   const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -59,6 +62,7 @@
     const before = clone(project)
     const draft = clone(project)
     mutator(draft)
+    reconcileWordIssues(draft)
     draft.updatedAt = new Date().toISOString()
     project = draft
     undoStack = [...undoStack.slice(-59), before]
@@ -308,6 +312,28 @@
     })
   }
 
+  function groupTextById(groupId: string) {
+    return project.groups.find((group) => group.id === groupId)?.text ?? ''
+  }
+
+  function reassignWordIssue(attemptId: string, issueId: string, groupId: string) {
+    if (!groupId) return
+    editProject((draft) => {
+      const issue = draft.attempts.find((attempt) => attempt.id === attemptId)?.wordIssues.find((item) => item.id === issueId)
+      const group = draft.groups.find((item) => item.id === groupId)
+      // 只允许挂到当前文字里确实含有这个词的意群；挂上后 reconcile 会自动摘掉待归属标记
+      if (!issue || !group || !group.text.includes(issue.word)) return
+      issue.groupId = groupId
+    })
+  }
+
+  function discardWordIssue(attemptId: string, issueId: string) {
+    editProject((draft) => {
+      const attempt = draft.attempts.find((item) => item.id === attemptId)
+      if (attempt) attempt.wordIssues = attempt.wordIssues.filter((issue) => issue.id !== issueId)
+    })
+  }
+
   function addFeedback() {
     if (!selectedGroup || !feedbackText.trim()) return
     editProject((draft) => {
@@ -390,7 +416,12 @@
   onMount(async () => {
     online = navigator.onLine
     const saved = await loadPractice()
-    if (saved) project = saved
+    if (saved) {
+      // 以前存的练习打开时也照同样规则复查错词归属
+      const moved = reconcileWordIssues(saved)
+      project = saved
+      if (moved) scheduleSave()
+    }
     selectedGroupId = project.groups[0]?.id ?? ''
     selectedAttemptId = project.attempts.at(-1)?.id ?? ''
     loaded = true
@@ -630,7 +661,7 @@
             <button class="btn btn-sm variant-filled-secondary span-2" on:click={addWordIssue}>添加错词记录</button>
           </div>
           <div class="issue-list">
-            {#each selectedAttempt.wordIssues.filter((issue) => issue.groupId === selectedGroupId) as issue}
+            {#each selectedAttempt.wordIssues.filter((issue) => issue.groupId === selectedGroupId && !issue.orphaned) as issue}
               <div class="issue-item">
                 <span class="badge variant-filled-warning">{issue.category}</span>
                 <strong>{issue.word}</strong>
@@ -638,8 +669,11 @@
                 <button class="btn btn-sm variant-ghost text-error-500" on:click={() => removeWordIssue(issue.id)}>移除</button>
               </div>
             {/each}
-            {#if !selectedAttempt.wordIssues.some((issue) => issue.groupId === selectedGroupId)}<p class="empty-copy">本轮意群还没有错词记录。</p>{/if}
+            {#if !selectedAttempt.wordIssues.some((issue) => issue.groupId === selectedGroupId && !issue.orphaned)}<p class="empty-copy">本轮意群还没有错词记录。</p>{/if}
           </div>
+          {#if selectedAttempt.wordIssues.some((issue) => issue.orphaned)}
+            <p class="orphan-hint">本轮有错词因文字改动不在原意群里了，已移出统计并列入待重新归属。<button type="button" on:click={() => workspaceTab = 'progress'}>到进度页处理</button></p>
+          {/if}
         </div>
       {/if}
 
@@ -662,6 +696,43 @@
     </aside>
 
     {#if workspaceTab === 'progress'}
+      <section class="orphan-panel card">
+        <div class="section-heading">
+          <div><span class="eyebrow">PENDING WORDS</span><h2>待重新归属的错词</h2></div>
+          <span class="chapter-badge">{orphanedIssues.length} 条</span>
+        </div>
+        {#if orphanedIssues.length}
+          <p class="orphan-intro">以下错词在文字改动后已不在原意群里，暂时移出分类统计。可以把它挂到含有这个词的意群上，或不再保留。</p>
+          <div class="orphan-list">
+            {#each orphanedIssues as entry (entry.issue.id)}
+              {@const candidates = candidateGroups(project, entry.issue.word)}
+              <div class="orphan-item">
+                <div class="orphan-copy">
+                  <strong>{entry.issue.word}</strong>
+                  <small>{entry.attempt.label} · 原分类「{entry.issue.category}」{entry.issue.note ? ` · ${entry.issue.note}` : ''}</small>
+                  <small>原意群：{groupTextById(entry.issue.groupId) || '已删除'}</small>
+                </div>
+                {#if candidates.length}
+                  <div class="orphan-actions">
+                    <select class="select" value={reassignTargets[entry.issue.id] ?? candidates[0].id} on:change={(event) => reassignTargets[entry.issue.id] = event.currentTarget.value}>
+                      {#each candidates as group}
+                        <option value={group.id}>{group.text}</option>
+                      {/each}
+                    </select>
+                    <button class="btn btn-sm variant-filled-primary" on:click={() => reassignWordIssue(entry.attempt.id, entry.issue.id, reassignTargets[entry.issue.id] ?? candidates[0].id)}>挂到该意群</button>
+                  </div>
+                {:else}
+                  <p class="empty-copy">当前文字里找不到这个词，可改回文字让它自动归位，或不再保留。</p>
+                {/if}
+                <button class="btn btn-sm variant-ghost text-error-500" on:click={() => discardWordIssue(entry.attempt.id, entry.issue.id)}>不再保留</button>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="empty-copy">所有错词都能在当前文字中找到，没有待重新归属的条目。</p>
+        {/if}
+      </section>
+
       <section class="progress-dashboard card">
         <div class="section-heading">
           <div><span class="eyebrow">PROGRESS</span><h2>练习进度与错词归类</h2></div>
@@ -670,7 +741,7 @@
           <div><strong>{project.attempts.length}</strong><span>累计尝试</span></div>
           <div><strong>{averageAccuracy}%</strong><span>当前准确度</span></div>
           <div><strong>{averageDeviation}%</strong><span>平均偏差</span></div>
-          <div><strong>{project.errorCategories.reduce((sum, category) => sum + project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category).length, 0)}</strong><span>错词记录</span></div>
+          <div><strong>{project.errorCategories.reduce((sum, category) => sum + project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category && !issue.orphaned).length, 0)}</strong><span>错词记录</span></div>
         </div>
         <div class="category-list">
           {#each totalIssueCategories as category}

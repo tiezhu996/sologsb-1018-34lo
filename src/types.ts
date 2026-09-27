@@ -25,6 +25,8 @@ export interface WordIssue {
   word: string
   category: string
   note: string
+  /** 文字改动后在该意群里找不到这个词时为 true，等待重新归属，不计入分类统计 */
+  orphaned?: boolean
 }
 
 export interface SegmentFeedback {

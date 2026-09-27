@@ -119,6 +119,16 @@ h2 { margin: 3px 0 0; font-size: 19px; font-weight: 800; letter-spacing: -.02em;
 .feedback-item p { margin: 5px 0; font-size: 12px; line-height: 1.55; }
 .feedback-item small, .empty-copy { color: #84939e; font-size: 10px; }
 .progress-dashboard { grid-column: 1 / -1; }
+.orphan-panel { grid-column: 1 / -1; }
+.orphan-intro { margin: -6px 0 14px; color: #7b6a4d; font-size: 12px; line-height: 1.6; }
+.orphan-list { display: grid; gap: 10px; }
+.orphan-item { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 340px) auto; gap: 12px; align-items: center; padding: 12px 14px; border: 1px dashed #d9b98a; border-radius: 11px; background: #fdf7ec; }
+.orphan-copy strong { font-size: 15px; }
+.orphan-copy small { display: block; margin-top: 4px; color: #8a7a5c; font-size: 11px; }
+.orphan-actions { display: flex; gap: 8px; align-items: center; }
+.orphan-actions .select { flex: 1; }
+.orphan-hint { margin: 4px 0 0; padding: 9px 11px; border-radius: 9px; color: #8a5a12; background: #fbf0dc; font-size: 11px; line-height: 1.6; }
+.orphan-hint button { padding: 0; border: 0; color: #17606b; background: none; font-weight: 700; text-decoration: underline; cursor: pointer; }
 .progress-grid { grid-template-columns: repeat(4, 1fr); }
 .progress-grid > div { display: grid; padding: 14px; border-radius: 11px; background: #f2f6f8; text-align: center; }
 .progress-grid strong { color: #17606b; font-size: 26px; }
@@ -166,6 +176,7 @@ h2 { margin: 3px 0 0; font-size: 19px; font-weight: 800; letter-spacing: -.02em;
   .practice-title span { display: none; }
   .card { padding: 14px; border-radius: 12px; }
   .annotation-grid, .score-grid, .range-controls, .issue-form { grid-template-columns: 1fr; }
+  .orphan-item { grid-template-columns: 1fr; }
   .span-2 { grid-column: auto; }
   .prosody-preview { grid-template-columns: 1fr; }
   .text-token { min-width: 28px; font-size: 18px; }
